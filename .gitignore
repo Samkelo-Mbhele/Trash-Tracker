@@ -9,6 +9,4 @@ dist
 keys/
 *.tsbuildinfo
 vite.config.js
-vite.config.d.tsgit add .gitignore
-git commit -m "Fix gitignore"
-git push
+vite.config.d.ts
