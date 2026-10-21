@@ -10,5 +10,5 @@ keys/
 *.tsbuildinfo
 vite.config.js
 vite.config.d.tsgit add .gitignore
-git commit -m "Ignore build leftovers"
+git commit -m "Fix gitignore"
 git push
