@@ -1,0 +1,125 @@
+rules_version = '2';
+
+// Publish with `firebase deploy --only firestore:rules`, or paste into
+// Firebase Console → Firestore Database → Rules.
+//
+// Two fields on /users/{uid} carry all the privilege and can never be set by
+// the account itself:
+//   admin: true            – Trash Tracker staff; set by hand in the console.
+//   municipalityId: "..."  – the one municipality an operations account may
+//                            work in; set by an admin on the /admin page.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+    function me() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+    function isAdmin() {
+      return signedIn() && me().get('admin', false) == true;
+    }
+    function hasRole(role) {
+      return signedIn() && me().get('role', '') == role;
+    }
+    function isApprovedOperations() {
+      return hasRole('operations') && me().get('municipalityId', '') != '';
+    }
+    // A record with no saved municipalityId matches nobody. Municipal queries must filter on this field
+    // (where('municipalityId', '==', mine)) or the whole query is refused.
+    function inMyMunicipality(data) {
+      return isApprovedOperations() && data.municipalityId == me().municipalityId;
+    }
+    function changedKeys() {
+      return request.resource.data.diff(resource.data).affectedKeys();
+    }
+    // A counter the owner may only create as 0, never change afterwards.
+    function keepsOrStartsAtZero(field) {
+      return !changedKeys().hasAny([field])
+        || (!(field in resource.data) && request.resource.data[field] == 0);
+    }
+    function zeroIfPresent(field) {
+      return !(field in request.resource.data) || request.resource.data[field] == 0;
+    }
+    function validRoleIfPresent() {
+      return !('role' in request.resource.data)
+        || request.resource.data.role in ['citizen', 'company', 'operations'];
+    }
+
+    match /users/{userId} {
+      allow read: if signedIn() && (request.auth.uid == userId || isAdmin());
+
+      allow create: if signedIn() && request.auth.uid == userId
+        && !request.resource.data.keys().hasAny(['admin'])
+        && (!('municipalityId' in request.resource.data)
+          || request.resource.data.municipalityId in ['ethekwini'])
+        && !request.resource.data.keys().hasAny(['points', 'balanceCash'])
+        && validRoleIfPresent()
+        && zeroIfPresent('reportsSubmitted') && zeroIfPresent('reportsVerified');
+
+      allow update: if
+        // The account itself: profile fields, a one-time role claim, and
+        // counting its own submitted reports one at a time.
+        (signedIn() && request.auth.uid == userId
+          && !changedKeys().hasAny(['admin', 'municipalityId'])
+          && !changedKeys().hasAny(['points', 'balanceCash'])
+          && (!changedKeys().hasAny(['role']) || (!('role' in resource.data) && validRoleIfPresent()))
+          && keepsOrStartsAtZero('reportsVerified')
+          && (keepsOrStartsAtZero('reportsSubmitted')
+            || request.resource.data.reportsSubmitted == resource.data.get('reportsSubmitted', 0) + 1))
+        || (signedIn() && request.auth.uid == userId
+          && hasRole('operations')
+          && !('municipalityId' in resource.data)
+          && request.resource.data.municipalityId in ['ethekwini']
+          && changedKeys().hasOnly(['municipalityId']))
+        // An admin approving (or un-approving) an operations account. Nobody
+        // else may write another account's document: a citizen's verified
+        // count is worked out from the reports themselves, not stored here.
+        || (isAdmin() && changedKeys().hasOnly(['municipalityId']));
+
+      match /wallet/{txId} {
+        allow read: if signedIn() && request.auth.uid == userId;
+      }
+    }
+
+    match /reports/{reportId} {
+      // Citizens and companies see every report (the public map); municipal
+      // accounts only their own municipality's, and none until approved.
+      allow read: if signedIn()
+        && (!hasRole('operations') || isAdmin() || inMyMunicipality(resource.data));
+
+      allow create: if signedIn()
+        && request.resource.data.reporterId == request.auth.uid
+        && request.resource.data.status == 'New'
+        && request.resource.data.verification == 'Pending'
+        && request.resource.data.municipalityId is string;
+
+      allow update: if
+        (inMyMunicipality(resource.data)
+          && !changedKeys().hasAny(['reporterId', 'municipalityId', 'lat', 'lng', 'reportedAt', 'photoThumbnail']))
+        || (isAdmin() && changedKeys().hasOnly(['municipalityId']));
+    }
+
+    match /crews/{crewId} {
+      allow read: if isAdmin() || inMyMunicipality(resource.data);
+
+      allow create: if isApprovedOperations()
+        && request.resource.data.keys().hasOnly(['name', 'size', 'status', 'municipalityId'])
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0
+        && request.resource.data.size is int
+        && request.resource.data.size > 0
+        && request.resource.data.status in ['Available', 'En route', 'Cleaning', 'Off duty']
+        && request.resource.data.municipalityId == me().municipalityId;
+
+      allow update: if
+        (inMyMunicipality(resource.data) && changedKeys().hasOnly(['status', 'currentTask']))
+        || (isAdmin() && changedKeys().hasOnly(['municipalityId']));
+    }
+
+    match /greenBelts/{beltId} {
+      allow read: if signedIn();
+      allow update: if hasRole('company') && changedKeys().hasOnly(['tier']);
+    }
+  }
+}
